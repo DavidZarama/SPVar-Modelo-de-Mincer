@@ -1,0 +1,8 @@
+numpy
+pandas
+requests
+statsmodels
+geopandas
+plotly
+streamlit
+# gradio  # solo si usa la interfaz Gradio (mincer_3d_nocturno.py) en Colab/Spaces/Codespaces

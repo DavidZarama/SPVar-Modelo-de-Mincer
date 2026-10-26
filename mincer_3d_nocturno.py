@@ -29,12 +29,17 @@ warnings.filterwarnings("ignore")
 
 
 def _instalar():
-    """Instala solo lo que falte (útil en Colab). Se llama desde main()."""
-    import importlib.util, subprocess, sys
-    req = {"geopandas": "geopandas", "requests": "requests", "statsmodels": "statsmodels", "gradio": "gradio", "plotly": "plotly"}
-    faltan = [p for p, m in req.items() if importlib.util.find_spec(m) is None]
-    if faltan:
-        print("Instalando:", ", ".join(faltan)); subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", *faltan])
+    """Solo en Google Colab: instala lo que falte. En Streamlit Cloud / Codespaces / servidores las dependencias van en
+    requirements.txt (pip en tiempo de ejecución no está permitido ahí). Nunca lanza excepción."""
+    import sys
+    if "google.colab" not in sys.modules: return
+    try:
+        import importlib.util, subprocess
+        req = {"geopandas": "geopandas", "requests": "requests", "statsmodels": "statsmodels", "gradio": "gradio", "plotly": "plotly"}
+        faltan = [p for p, m in req.items() if importlib.util.find_spec(m) is None]
+        if faltan:
+            print("Instalando:", ", ".join(faltan)); subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", *faltan])
+    except Exception as ex: print("⚠️ No se pudo instalar automáticamente:", str(ex)[:120])
 
 
 # ============================================================ BLOQUE A — utilidades, geometría oficial MGN-DANE y escena 3D/AR
@@ -107,7 +112,6 @@ DATA = "data"
 
 def load_geometry():
     """Límites oficiales DANE-MGN (ver spvar_data.fetch_mgn). Devuelve geometría ligera + matrices auxiliares."""
-    from spvar_data import fetch_mgn
     g = fetch_mgn(DATA); gp = g.to_crs(9377)               # MAGNA-SIRGAS Origen Nacional (metros)
     xy = np.c_[gp.geometry.centroid.x, gp.geometry.centroid.y]
     geoms = list(gp.geometry.buffer(1000)); n = len(g); adj = np.zeros((n, n))
@@ -260,8 +264,10 @@ def _leer_csv(zf, member, usecols):
         except UnicodeDecodeError: continue
     primera = txt.split("\n", 1)[0]
     sep = max([";", ",", "\t"], key=primera.count)                                       # el DANE publica con ';' (se detecta)
-    df = pd.read_csv(io.StringIO(txt), sep=sep, dtype=str, low_memory=False)
+    quiero = set(usecols)                                                                  # leer SOLO las columnas oficiales usadas
+    df = pd.read_csv(io.StringIO(txt), sep=sep, dtype=str, low_memory=False, usecols=lambda c: c.strip().strip('"').upper() in quiero)
     df.columns = [c.strip().strip('"').upper() for c in df.columns]
+    del txt, raw
     faltan = [c for c in usecols if c not in df.columns]
     if faltan: raise KeyError(f"{member}: faltan columnas oficiales {faltan}. Columnas disponibles (muestra): {list(df.columns)[:15]}")
     df = df[usecols].copy()
@@ -280,16 +286,23 @@ def leer_zip_mensual(path):
     for d in (a, b): d.drop_duplicates(KEYS, inplace=True)                                # llave única por persona-mes
     return b.merge(a, on=KEYS, how="inner", validate="one_to_one")
 
-def cargar_geih(year=2024, meses=None, catalog_id=None, outdir="data/geih", verbose=True):
-    """Descarga (o reutiliza) los zips mensuales del año y devuelve el DataFrame de ocupados con las variables oficiales."""
+def cargar_geih(year=2024, meses=None, catalog_id=None, outdir="data/geih", verbose=True, limite=None):
+    """Descarga (o reutiliza) los zips mensuales del año y devuelve el DataFrame de ocupados con las variables oficiales.
+    limite: máximo de archivos mensuales a bajar (útil en servidores con poca memoria/disco); None = todos."""
     cid = catalog_id or CATALOGOS.get(year)
     if cid is None: raise ValueError(f"Sin catálogo verificado para {year}. Conocidos: {CATALOGOS}. Pase catalog_id=… (número en la URL del ANDA).")
     outdir = Path(outdir) / str(year); ses = _session(); partes = []
     locales = sorted(outdir.glob("*.zip")) if outdir.exists() else []
-    if not locales:
-        for rid, nombre in listar_archivos(cid, ses):
+    try:                                                                                   # completa lo que falte (descargar_mes reutiliza lo existente)
+        listado = listar_archivos(cid, ses)[:limite] if limite else listar_archivos(cid, ses)
+        locales = []
+        for rid, nombre in listado:
             locales.append(descargar_mes(cid, rid, nombre, outdir, ses))
             if verbose: print(f"  ↓ {nombre}")
+    except Exception as ex:
+        if not locales: raise
+        print(f"⚠️ No se pudo consultar el portal ({str(ex)[:100]}); se usan {len(locales)} zips locales.")
+    if limite: locales = locales[:limite]
     for z in locales:
         try:
             m = leer_zip_mensual(z); partes.append(m)
